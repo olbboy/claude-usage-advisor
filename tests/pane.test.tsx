@@ -32,6 +32,7 @@ const REPORT = {
       sharePct: 75.3, isMain: true, weightedLabel: '812.3M',
     },
   ],
+  breakdown: [{ title: 'Plugin', items: [{ name: 'ak-engineer', sharePct: 12.3 }, { name: 'mattpocock-skills', sharePct: 1.6 }] }],
 }
 
 test('the pane lists what used the usage and a Fix sends its prompt', async ($, on) => {
@@ -40,6 +41,9 @@ test('the pane lists what used the usage and a Fix sends its prompt', async ($, 
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('env.get', () => ({ value: '/Users/test' }))
   on('session.cwd', () => ({ value: '/work' }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { window: 200000 }, rateLimits: [{ kind: 'seven_day', percentUsed: 84, resetsAt: '2026-11-17T07:00:00Z' }] },
+  }))
   on('process.run', () => ({
     value: { exitCode: 0, stdout: JSON.stringify(REPORT), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
@@ -56,6 +60,8 @@ test('the pane lists what used the usage and a Fix sends its prompt', async ($, 
     expect((await ui.find({ type: 'Text', text: /26341 lượt gọi/ }))).toBeDefined()
     expect((await ui.find({ type: 'Text', text: /67.9% Effort xhigh/ }))).toBeDefined()
     expect((await ui.find({ key: 'fix:long' }))?.text).toBe('Thu gọn phiên này')
+    expect((await ui.find({ type: 'Text', text: /Tuần này: .* 84% đã dùng · reset 17\/11/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /1.6%  mattpocock-skills/ }))).toBeDefined()
     await ui.unmount()
   }
 

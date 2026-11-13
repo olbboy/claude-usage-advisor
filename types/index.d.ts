@@ -11,6 +11,8 @@ export type Row = {
   weightedLabel: string
 }
 
+export type Group = { title: string; items: { name: string; sharePct: number }[] }
+
 export type Report = {
   generatedAt: string
   days: number
@@ -18,6 +20,7 @@ export type Report = {
   requests: number
   tookMs: number
   rows: Row[]
+  breakdown?: Group[]
 }
 
 export type Scan = {

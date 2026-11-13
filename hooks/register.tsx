@@ -76,6 +76,15 @@ function age(iso: string): string {
   return `${Math.round(min / 60)} giờ trước`
 }
 
+const WINDOW: Record<string, string> = { seven_day: 'Tuần này', five_hour: '5 giờ qua', spend_limit: 'Hạn mức chi' }
+
+function resetLabel(iso: string | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return ` · reset ${pad(d.getDate())}/${pad(d.getMonth() + 1)} lúc ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 function bar(pct: number, width: number): string {
   const full = Math.max(1, Math.round((Math.min(100, pct) / 100) * width))
   return '█'.repeat(full) + '·'.repeat(Math.max(0, width - full))
@@ -102,6 +111,7 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const s = await read($, scan)
     const report = s.days === 7 ? s.week : s.day
+    const limits = await $.session.usage().then(u => u.rateLimits, () => [])
     const barWidth = Math.max(6, Math.min(20, (e.props.bodyColumns ?? 40) - 30))
     const choose = (days: 1 | 7) => () => {
       void update($, scan, x => ({ ...x, days }))
@@ -117,6 +127,11 @@ export const register: Register = on => {
           <Text> </Text>
           <Button key="refresh" label={s.isRunning ? 'Đang quét…' : 'Quét lại'} hotkey="r" onPress={() => void refresh($, s.days)} />
         </Box>
+        {limits.map(l => (
+          <Text color={l.percentUsed >= 80 ? 'yellow' : undefined}>
+            {WINDOW[l.kind] ?? l.kind}: {bar(l.percentUsed, barWidth)} {l.percentUsed}% đã dùng{resetLabel(l.resetsAt)}
+          </Text>
+        ))}
         {s.error ? <Text color="red">Không quét được: {s.error}</Text> : null}
         {report ? (
           <Text dimColor>
@@ -141,6 +156,16 @@ export const register: Register = on => {
               dimColor={s.sent.includes(row.id)}
               onPress={() => void applyFix($, row)}
             />
+          </Box>
+        ))}
+        {(report?.breakdown ?? []).map(g => (
+          <Box key={`group:${g.title}`} flexDirection="column" marginTop={1}>
+            <Text bold>{g.title} · % usage</Text>
+            {g.items.map(i => (
+              <Text wrap="truncate-end">
+                {String(i.sharePct).padStart(5)}%  {i.name}
+              </Text>
+            ))}
           </Box>
         ))}
         {report ? (

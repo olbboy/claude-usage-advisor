@@ -16,10 +16,13 @@ import { join, dirname, basename } from 'node:path'
 const HOME = homedir()
 const ROOT = join(HOME, '.claude', 'projects')
 const CACHE_DIR = join(HOME, '.cache', 'usage-advisor')
-const CACHE_FILE = join(CACHE_DIR, 'cache-v1.json')
+const CACHE_FILE = join(CACHE_DIR, 'cache-v2.json')
 const LONG_CONTEXT = 200_000
 const COLD_WRITE_MIN = 20_000
 const SHOW_MIN_SHARE = 0.03
+const DETAIL_MIN_SHARE = 0.01
+const LONG_SESSION_MS = 8 * 3600_000
+const MANY_PROMPTS = 20
 const MAIN_SHARE = 0.1
 
 const args = process.argv.slice(2)
@@ -61,8 +64,9 @@ function weigh(u) {
 
 const emptyDay = () => ({
   w: 0, n: 0,
-  skill: {}, mcp: {}, agent: {},
+  skill: {}, mcp: {}, agent: {}, plugin: {},
   long: { w: 0, n: 0 }, cold: { w: 0, n: 0 }, effort: { w: 0, n: 0 },
+  longSession: { w: 0, n: 0 }, manyTurns: { w: 0, n: 0 },
   hook: {}, cwd: {},
 })
 const add = (obj, k, v) => { obj[k] = (obj[k] || 0) + v }
@@ -83,12 +87,14 @@ async function scanFile(file) {
   const reqs = new Map() // requestId -> last record
   const order = []
   let hookTokens = 0
+  let prompts = 0
   const hookByName = {}
   const lines = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of lines) {
     const isAssistant = line.includes('"type":"assistant"') && line.includes('"usage"')
     const isHook = line.includes('"hook_additional_context"')
-    if (!isAssistant && !isHook) continue
+    const isPrompt = !isAgent && line.includes('"type":"user"') && !line.includes('"tool_result"')
+    if (!isAssistant && !isHook && !isPrompt) continue
     let d
     try { d = JSON.parse(line) } catch { continue }
     if (isHook && d.type === 'attachment' && d.attachment?.type === 'hook_additional_context') {
@@ -100,14 +106,24 @@ async function scanFile(file) {
       hookByName[name] = (hookByName[name] || 0) + t
       continue
     }
+    if (isPrompt && d.type === 'user') {
+      if (!d.isMeta && !d.isSidechain && !d.isCompactSummary) prompts += 1
+      continue
+    }
     if (d.type !== 'assistant' || !d.message?.usage) continue
     const id = d.requestId || d.message.id || `${order.length}`
     if (!reqs.has(id)) order.push(id)
-    reqs.set(id, { d, hookTokens, hookShare: { ...hookByName } })
+    reqs.set(id, { d, hookTokens, hookShare: { ...hookByName }, prompts })
   }
+  let first = Infinity, last = 0
+  for (const { d } of reqs.values()) {
+    const t = Date.parse(d.timestamp) || 0
+    if (t) { first = Math.min(first, t); last = Math.max(last, t) }
+  }
+  const isLongSession = !isAgent && last - first >= LONG_SESSION_MS
   let prevT = 0
   for (const id of order) {
-    const { d, hookTokens: ht, hookShare } = reqs.get(id)
+    const { d, hookTokens: ht, hookShare, prompts: before } = reqs.get(id)
     const t = Date.parse(d.timestamp) || 0
     const key = dayKey(t)
     const day = (byDay[key] ??= emptyDay())
@@ -116,7 +132,10 @@ async function scanFile(file) {
     day.n += 1
     if (d.attributionSkill) add(day.skill, d.attributionSkill, u.w)
     if (d.attributionMcpServer) add(day.mcp, d.attributionMcpServer, u.w)
+    if (d.attributionPlugin) add(day.plugin, d.attributionPlugin, u.w)
     if (agentType) add(day.agent, agentType, u.w)
+    if (isLongSession) { day.longSession.w += u.w; day.longSession.n += 1 }
+    if (!isAgent && before > MANY_PROMPTS) { day.manyTurns.w += u.w; day.manyTurns.n += 1 }
     if (u.ctx > LONG_CONTEXT) { day.long.w += u.w; day.long.n += 1 }
     const gap = prevT ? (t - prevT) / 1000 : 0
     if (prevT && u.cw >= COLD_WRITE_MIN && gap >= (u.has1h ? 3600 : 300)) {
@@ -212,8 +231,8 @@ async function main() {
     for (const [k, day] of Object.entries(byDay)) {
       if (!wantedDays.has(k)) continue
       total.w += day.w; total.n += day.n
-      for (const b of ['skill', 'mcp', 'agent', 'hook', 'cwd']) for (const [n, v] of Object.entries(day[b])) add(total[b], n, v)
-      for (const b of ['long', 'cold', 'effort']) { total[b].w += day[b].w; total[b].n += day[b].n }
+      for (const b of ['skill', 'mcp', 'agent', 'plugin', 'hook', 'cwd']) for (const [n, v] of Object.entries(day[b])) add(total[b], n, v)
+      for (const b of ['long', 'cold', 'effort', 'longSession', 'manyTurns']) { total[b].w += day[b].w; total[b].n += day[b].n }
     }
   }
   try {
@@ -246,6 +265,23 @@ async function main() {
       fix: { type: 'prompt', text: `Subagent loại "${name}" chiếm khoảng ${pct(w / T)} usage ${days} ngày qua. Tìm định nghĩa agent này (file .md trong agents/ hoặc plugin), rồi đề xuất: chạy nó trên model rẻ hơn (trường model trong frontmatter), hạ effort, hoặc giao cho nó ít việc hơn. ${SHOW_FIRST}` },
     })
   }
+  for (const [name, w] of Object.entries(total.plugin)) {
+    row({
+      id: `plugin:${name}`, kind: 'plugin', label: `Plugin ${name}`, weighted: w,
+      detail: 'Lượt gọi model gắn với skill, agent hoặc công cụ của plugin này.',
+      fix: { type: 'prompt', text: `Plugin "${name}" gắn với khoảng ${pct(w / T)} usage ${days} ngày qua. Liệt kê những skill, agent, hook và máy chủ MCP plugin này cài vào, phần nào tôi thật sự dùng, và đề xuất: tắt plugin ở dự án không cần, tắt riêng phần không dùng, hoặc cho agent của nó chạy model rẻ hơn. ${SHOW_FIRST}` },
+    })
+  }
+  if (total.longSession.n) row({
+    id: 'long-session', kind: 'session', label: 'Phiên chạy từ 8 giờ trở lên', weighted: total.longSession.w,
+    detail: `${total.longSession.n} lượt gọi nằm trong phiên kéo dài từ 8 giờ trở lên (tính từ lượt đầu tới lượt cuối).`,
+    fix: { type: 'prompt', text: `Khoảng ${pct(total.longSession.w / T)} usage ${days} ngày qua nằm trong các phiên kéo dài từ 8 giờ trở lên. Liệt kê các phiên Claude Code đang mở hoặc đang chạy nền trên máy này, việc mỗi phiên đang làm và lần cuối nó hoạt động, rồi đề xuất phiên nào nên dừng hoặc lưu trữ. Đừng dừng hay lưu trữ phiên nào trước khi tôi chọn.` },
+  })
+  if (total.manyTurns.n) row({
+    id: 'many-turns', kind: 'session', label: `Phiên đã quá ${MANY_PROMPTS} lượt hỏi`, weighted: total.manyTurns.w,
+    detail: 'Lượt gọi sau lượt hỏi thứ 20 của phiên vẫn mang theo ngữ cảnh của các việc trước.',
+    fix: { type: 'prompt', text: `Khoảng ${pct(total.manyTurns.w / T)} usage ${days} ngày qua đến từ các phiên đã quá ${MANY_PROMPTS} lượt hỏi, nơi mỗi lượt vẫn mang theo ngữ cảnh của việc cũ. Viết cho tôi một bản bàn giao ngắn của phiên này (việc đang làm, quyết định đã chốt, file đang sửa, bước tiếp theo) để tôi chạy /clear rồi dán vào phiên mới khi đổi việc.` },
+  })
   if (total.long.n) row({
     id: 'long', kind: 'long', label: 'Ngữ cảnh dài trên 200K token', weighted: total.long.w,
     detail: `${total.long.n} lượt gọi gửi đi hơn 200K token ngữ cảnh.`,
@@ -290,6 +326,16 @@ async function main() {
   }
 
   rows.sort((a, b) => b.weighted - a.weighted)
+  const detail = b => Object.entries(total[b])
+    .filter(([, w]) => w / T >= DETAIL_MIN_SHARE)
+    .sort((x, y) => y[1] - x[1])
+    .map(([name, w]) => ({ name, sharePct: Math.round((w / T) * 1000) / 10 }))
+  const breakdown = [
+    { title: 'Skill', items: detail('skill') },
+    { title: 'Subagent', items: detail('agent') },
+    { title: 'Plugin', items: detail('plugin') },
+    { title: 'Máy chủ MCP', items: detail('mcp') },
+  ].filter(g => g.items.length)
   const out = {
     generatedAt: new Date().toISOString(),
     days,
@@ -299,7 +345,8 @@ async function main() {
     files: { scanned, reused, failed },
     tookMs: Date.now() - t0,
     sessionCwd,
-    rows: rows.slice(0, 15).map(r => ({
+    breakdown,
+    rows: rows.slice(0, 20).map(r => ({
       id: r.id, kind: r.kind, label: r.label, detail: r.detail, fix: r.fix,
       sharePct: Math.round(r.share * 1000) / 10, isMain: r.share >= MAIN_SHARE, weightedLabel: fmt(r.weighted),
     })),
