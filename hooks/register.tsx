@@ -58,8 +58,28 @@ function refresh($: EngineInterface, days: 1 | 7): Promise<void> {
   return running
 }
 
+/** Remembers when rows were fixed, in the file the scanner reads, so it can count usage from then on. */
+async function markFixed($: EngineInterface, ids: string[]): Promise<void> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const path = `${home}/.cache/usage-advisor/fixed.json`
+  let fixed: Record<string, number> = {}
+  try {
+    fixed = JSON.parse(await $.fs.read(path)) as Record<string, number>
+  } catch {
+    // First fix: no file yet.
+  }
+  const at = Date.now()
+  for (const id of ids) fixed[id] = at
+  try {
+    await $.fs.write(path, JSON.stringify(fixed))
+  } catch {
+    $.ui.toast('Không ghi được thời điểm sửa; dòng "từ lần sửa" sẽ không hiện.')
+  }
+}
+
 async function applyFix($: EngineInterface, row: Row): Promise<void> {
   await update($, scan, s => ({ ...s, sent: [...s.sent.filter(id => id !== row.id), row.id] }))
+  await markFixed($, [row.id])
   if (row.fix.type === 'compact') {
     $.ui.toast('Đang thu gọn phiên…')
     const result = await $.session.compact({ instructions: row.fix.text })
@@ -98,6 +118,13 @@ function count(n: number): string {
 /** A share as people say it: 75,5 -> "76%", under 10 keeps one decimal. */
 function share(pct: number): string {
   return pct >= 10 ? `${Math.round(pct)}%` : `${String(pct).replace('.', ',')}%`
+}
+
+function sinceLabel(since: NonNullable<Row['since']>, before: number): string {
+  const d = new Date(since.fixedAt)
+  const when = `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:00`
+  if (since.sharePct === null) return `Từ lần sửa (${when}): mới ${count(since.requests)} lượt gọi, chưa đủ để tính`
+  return `Từ lần sửa (${when}): ${share(since.sharePct)}, cả khung là ${share(before)}`
 }
 
 /** A thin meter: filled and empty cells of the same glyph weight, so it reads as one line. */
@@ -152,6 +179,13 @@ export const register: Register = on => {
             </Box>
             <Button key={`fix:${row.id}`} label={label} dimColor={isSent} onPress={() => void applyFix($, row)} />
           </Box>
+          {row.since ? (
+            <Box paddingLeft={5}>
+              <Text size="footnote" color={row.since.sharePct !== null && row.since.sharePct < row.sharePct ? 'success' : 'subtle'}>
+                {sinceLabel(row.since, row.sharePct)}
+              </Text>
+            </Box>
+          ) : null}
           <Box paddingLeft={5}>
             <Text size="footnote" color="subtle">
               {row.detail}{isSent ? ' · ' : ''}
@@ -212,7 +246,10 @@ export const register: Register = on => {
                 label={`Xem và sửa ${report.fixAll.count} mục (f)`}
                 hotkey="f"
                 variant="primary"
-                onPress={() => void $.prompt.submit({ text: report.fixAll?.text ?? '' })}
+                onPress={() => {
+                  void markFixed($, report.fixAll?.ids ?? [])
+                  void $.prompt.submit({ text: report.fixAll?.text ?? '' })
+                }}
               />
             </Box>
           </Box>

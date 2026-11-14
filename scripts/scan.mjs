@@ -16,7 +16,7 @@ import { join, dirname, basename } from 'node:path'
 const HOME = homedir()
 const ROOT = join(HOME, '.claude', 'projects')
 const CACHE_DIR = join(HOME, '.cache', 'usage-advisor')
-const CACHE_FILE = join(CACHE_DIR, 'cache-v2.json')
+const CACHE_FILE = join(CACHE_DIR, 'cache-v3.json')
 const LONG_CONTEXT = 200_000
 const COLD_WRITE_MIN = 20_000
 const SHOW_MIN_SHARE = 0.03
@@ -32,14 +32,20 @@ const arg = (name, fallback) => {
 }
 const days = Math.max(1, Math.min(7, Number(arg('days', '7')) || 7))
 const sessionCwd = arg('cwd', '')
+// When each suggestion was last fixed from the pane: { rowId: ms }. The pane writes it.
+const FIXED_FILE = join(CACHE_DIR, 'fixed.json')
+let fixed = {}
+const MIN_SINCE_REQUESTS = 30
 
 const dayKey = ms => {
   const d = new Date(ms)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
+// Buckets are hours, so a share can be counted from the hour a fix was made.
+const hourKey = ms => `${dayKey(ms)}T${String(new Date(ms).getHours()).padStart(2, '0')}`
 const now = Date.now()
-const wantedDays = new Set()
-for (let i = 0; i < days; i++) wantedDays.add(dayKey(now - i * 86_400_000))
+// The window is the last 24 or 168 hours, counted in whole hours.
+const windowStart = hourKey(now - days * 86_400_000 + 3_600_000)
 const oldest = now - 7 * 86_400_000
 
 function weigh(u) {
@@ -125,7 +131,7 @@ async function scanFile(file) {
   for (const id of order) {
     const { d, hookTokens: ht, hookShare, prompts: before } = reqs.get(id)
     const t = Date.parse(d.timestamp) || 0
-    const key = dayKey(t)
+    const key = hourKey(t)
     const day = (byDay[key] ??= emptyDay())
     const u = weigh(d.message.usage)
     day.w += u.w
@@ -212,11 +218,12 @@ async function main() {
   const t0 = Date.now()
   let cache = {}
   try { cache = JSON.parse(await fs.readFile(CACHE_FILE, 'utf8')) } catch {}
+  try { fixed = JSON.parse(await fs.readFile(FIXED_FILE, 'utf8')) || {} } catch {}
   const files = []
   await walk(ROOT, files)
   const fresh = {}
   let scanned = 0, reused = 0, failed = 0
-  const total = emptyDay()
+  const buckets = []
   for (const f of files) {
     let st
     try { st = await fs.stat(f) } catch { continue }
@@ -228,13 +235,19 @@ async function main() {
       try { byDay = await scanFile(f); scanned++ } catch { failed++; continue }
     }
     fresh[f] = { size: st.size, mtimeMs: st.mtimeMs, byDay }
-    for (const [k, day] of Object.entries(byDay)) {
-      if (!wantedDays.has(k)) continue
+    for (const [k, day] of Object.entries(byDay)) buckets.push([k, day])
+  }
+  const sum = keep => {
+    const total = emptyDay()
+    for (const [k, day] of buckets) {
+      if (!keep(k)) continue
       total.w += day.w; total.n += day.n
       for (const b of ['skill', 'mcp', 'agent', 'plugin', 'hook', 'cwd']) for (const [n, v] of Object.entries(day[b])) add(total[b], n, v)
       for (const b of ['long', 'cold', 'effort', 'longSession', 'manyTurns']) { total[b].w += day[b].w; total[b].n += day[b].n }
     }
+    return total
   }
+  const total = sum(k => k >= windowStart)
   try {
     await fs.mkdir(CACHE_DIR, { recursive: true })
     await fs.writeFile(CACHE_FILE, JSON.stringify(fresh))
@@ -333,11 +346,33 @@ async function main() {
   }
 
   rows.sort((a, b) => b.weighted - a.weighted)
+  // What a row weighs in any total: the same buckets the row was built from.
+  const weightOf = (t, id) => {
+    const [kind, ...rest] = id.split(':')
+    const name = rest.join(':')
+    const map = { skill: t.skill, mcp: t.mcp, agent: t.agent, plugin: t.plugin, hook: t.hook }[kind]
+    if (map) return map[name] || 0
+    return { long: t.long.w, cold: t.cold.w, effort: t.effort.w, 'long-session': t.longSession.w, 'many-turns': t.manyTurns.w }[id]
+  }
+  for (const r of rows) {
+    const at = Number(fixed[r.id])
+    if (!at) continue
+    const from = hourKey(at)
+    const after = sum(k => k >= from)
+    const w = weightOf(after, r.id)
+    if (w === undefined) continue
+    r.since = {
+      fixedAt: new Date(at).toISOString(),
+      requests: after.n,
+      sharePct: after.n >= MIN_SINCE_REQUESTS ? Math.round((w / (after.w || 1)) * 1000) / 10 : null,
+    }
+  }
   const main = rows.filter(r => r.weighted / T >= MAIN_SHARE)
   const fixable = main.filter(r => r.ask)
   const fixAll = fixable.length ? {
     count: fixable.length,
     of: main.length,
+    ids: fixable.map(r => r.id),
     text: `Sửa những gì bảng Usage chỉ ra cho ${days === 1 ? '24 giờ' : `${days} ngày`} qua. ${SHOW_FIRST}\n${fixable.map((r, i) => `${i + 1}. ${r.ask}`).join('\n')}`,
   } : null
   const detail = b => Object.entries(total[b])
@@ -364,6 +399,7 @@ async function main() {
     rows: rows.slice(0, 20).map(r => ({
       id: r.id, kind: r.kind, label: r.label, detail: r.detail, fix: r.fix,
       sharePct: Math.round(r.share * 1000) / 10, isMain: r.share >= MAIN_SHARE, weightedLabel: fmt(r.weighted),
+      ...(r.since ? { since: r.since } : {}),
     })),
   }
   process.stdout.write(JSON.stringify(out))

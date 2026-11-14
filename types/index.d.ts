@@ -9,6 +9,8 @@ export type Row = {
   sharePct: number
   isMain: boolean
   weightedLabel: string
+  /** The row's share counted from the hour it was last fixed; null while too few requests followed. */
+  since?: { fixedAt: string; requests: number; sharePct: number | null }
 }
 
 export type Group = { title: string; items: { name: string; sharePct: number }[] }
@@ -21,7 +23,7 @@ export type Report = {
   tookMs: number
   rows: Row[]
   breakdown?: Group[]
-  fixAll?: { count: number; of: number; text: string } | null
+  fixAll?: { count: number; of: number; text: string; ids?: string[] } | null
 }
 
 export type Scan = {
