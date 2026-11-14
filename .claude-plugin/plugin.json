@@ -1,6 +1,6 @@
 {
   "name": "usage-advisor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pane showing what used your Claude Code usage over the last 7 days, with a Fix button per suggestion",
   "author": { "name": "olbboy" },
   "license": "MIT",

@@ -21,6 +21,7 @@ export type Report = {
   tookMs: number
   rows: Row[]
   breakdown?: Group[]
+  fixAll?: { count: number; of: number; text: string } | null
 }
 
 export type Scan = {

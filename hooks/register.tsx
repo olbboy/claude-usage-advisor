@@ -125,6 +125,18 @@ export const register: Register = on => {
           <Text> </Text>
           <Button key="day" label="24 giờ" variant={s.days === 1 ? 'primary' : 'secondary'} hotkey="d" onPress={choose(1)} />
           <Text> </Text>
+          {report?.fixAll ? (
+            <>
+              <Button
+                key="fix-all"
+                label={`Sửa ${report.fixAll.count} trong ${report.fixAll.of} gợi ý (f)`}
+                hotkey="f"
+                variant="primary"
+                onPress={() => void $.prompt.submit({ text: report.fixAll?.text ?? '' })}
+              />
+              <Text> </Text>
+            </>
+          ) : null}
           <Button key="refresh" label={s.isRunning ? 'Đang quét…' : 'Quét lại'} hotkey="r" onPress={() => void refresh($, s.days)} />
         </Box>
         {limits.map(l => (

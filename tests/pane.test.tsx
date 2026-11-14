@@ -32,6 +32,7 @@ const REPORT = {
       sharePct: 75.3, isMain: true, weightedLabel: '812.3M',
     },
   ],
+  fixAll: { count: 1, of: 2, text: 'Sửa những gì bảng Usage chỉ ra.\n1. Hạ effort.' },
   breakdown: [{ title: 'Plugin', items: [{ name: 'ak-engineer', sharePct: 12.3 }, { name: 'mattpocock-skills', sharePct: 1.6 }] }],
 }
 
@@ -68,6 +69,9 @@ test('the pane lists what used the usage and a Fix sends its prompt', async ($, 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'fix:effort' })
   expect(submitted).toEqual(['Hạ effort mặc định. Cho tôi xem từng thay đổi.'])
+  expect((await ui.find({ key: 'fix-all' }))?.text).toBe('Sửa 1 trong 2 gợi ý (f)')
+  await ui.press({ key: 'fix-all' })
+  expect(submitted[1]).toBe('Sửa những gì bảng Usage chỉ ra.\n1. Hạ effort.')
   expect((await ui.find({ key: 'fix:effort' }))?.text).toBe('Đã gửi, gửi lại')
   await ui.unmount()
 })
