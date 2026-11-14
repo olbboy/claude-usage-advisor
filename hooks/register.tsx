@@ -76,18 +76,34 @@ function age(iso: string): string {
   return `${Math.round(min / 60)} giờ trước`
 }
 
-const WINDOW: Record<string, string> = { seven_day: 'Tuần này', five_hour: '5 giờ qua', spend_limit: 'Hạn mức chi' }
+const WINDOW: Record<string, string> = { seven_day: 'Giới hạn tuần', five_hour: 'Giới hạn 5 giờ', spend_limit: 'Hạn mức chi' }
+const WEEKDAY = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7']
+
+/** Kinds a config change can fix; the rest need the person to change a habit. */
+const CONFIG_KINDS = new Set(['skill', 'mcp', 'agent', 'plugin', 'effort', 'hook', 'instructions'])
+
+const pad2 = (n: number) => String(n).padStart(2, '0')
 
 function resetLabel(iso: string | undefined): string {
   if (!iso) return ''
   const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return ` · reset ${pad(d.getDate())}/${pad(d.getMonth() + 1)} lúc ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `Làm mới ${WEEKDAY[d.getDay()]} ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
-function bar(pct: number, width: number): string {
-  const full = Math.max(1, Math.round((Math.min(100, pct) / 100) * width))
-  return '█'.repeat(full) + '·'.repeat(Math.max(0, width - full))
+/** 26855 -> "26.855", the way Vietnamese writes thousands. */
+function count(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+
+/** A share as people say it: 75,5 -> "76%", under 10 keeps one decimal. */
+function share(pct: number): string {
+  return pct >= 10 ? `${Math.round(pct)}%` : `${String(pct).replace('.', ',')}%`
+}
+
+/** A thin meter: filled and empty cells of the same glyph weight, so it reads as one line. */
+function meter(pct: number, width: number): { on: string; off: string } {
+  const on = Math.max(0, Math.min(width, Math.round((pct / 100) * width)))
+  return { on: '━'.repeat(on), off: '━'.repeat(width - on) }
 }
 
 export const register: Register = on => {
@@ -112,78 +128,143 @@ export const register: Register = on => {
     const s = await read($, scan)
     const report = s.days === 7 ? s.week : s.day
     const limits = await $.session.usage().then(u => u.rateLimits, () => [])
-    const barWidth = Math.max(6, Math.min(20, (e.props.bodyColumns ?? 40) - 30))
+    const width = Math.max(12, (e.props.bodyColumns ?? 40) - 2)
     const choose = (days: 1 | 7) => () => {
       void update($, scan, x => ({ ...x, days }))
       void refresh($, days)
     }
+    const rows = report?.rows ?? []
+    const configRows = rows.filter(r => CONFIG_KINDS.has(r.kind))
+    const habitRows = rows.filter(r => !CONFIG_KINDS.has(r.kind))
+    const period = s.days === 7 ? '7 ngày' : '24 giờ'
+
+    const renderRow = (row: Row) => {
+      const isSent = s.sent.includes(row.id)
+      const label = row.fix.type === 'compact'
+        ? (isSent ? 'Thu gọn lại' : 'Thu gọn phiên')
+        : (isSent ? 'Gửi lại' : 'Sửa')
+      return (
+        <Box key={row.id} flexDirection="column" marginTop={1}>
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
+            <Box flexDirection="row" flexShrink={1} columnGap={1}>
+              <Text tabular weight="semibold" color={row.isMain ? undefined : 'subtle'}>{share(row.sharePct).padStart(4)}</Text>
+              <Text wrap="truncate-end" weight={row.isMain ? 'medium' : 'regular'}>{row.label}</Text>
+            </Box>
+            <Button key={`fix:${row.id}`} label={label} dimColor={isSent} onPress={() => void applyFix($, row)} />
+          </Box>
+          <Box paddingLeft={5}>
+            <Text size="footnote" color="subtle">
+              {row.detail}{isSent ? ' · ' : ''}
+              {isSent ? <Text size="footnote" color="success">{row.fix.type === 'compact' ? 'đã thu gọn' : 'đã gửi vào phiên'}</Text> : null}
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Button key="week" label="7 ngày" variant={s.days === 7 ? 'primary' : 'secondary'} hotkey="w" onPress={choose(7)} />
-          <Text> </Text>
-          <Button key="day" label="24 giờ" variant={s.days === 1 ? 'primary' : 'secondary'} hotkey="d" onPress={choose(1)} />
-          <Text> </Text>
-          {report?.fixAll ? (
-            <>
+      <Box flexDirection="column" paddingX={1}>
+        {/* Plan limits: the one thing to read first. */}
+        {limits.length === 0 ? (
+          <Text size="footnote" color="subtle">Chưa có số giới hạn của gói: Claude Code chỉ báo sau lượt gọi đầu tiên.</Text>
+        ) : null}
+        {limits.map(l => {
+          const m = meter(l.percentUsed, width)
+          const tone = l.percentUsed >= 90 ? 'error' : l.percentUsed >= 75 ? 'warning' : undefined
+          return (
+            <Box key={`limit:${l.kind}`} flexDirection="column" marginBottom={1}>
+              <Box flexDirection="row" justifyContent="space-between" alignItems="flex-end">
+                <Text size="footnote" color="subtle">{WINDOW[l.kind] ?? l.kind}</Text>
+                <Text size="footnote" color="subtle">{resetLabel(l.resetsAt)}</Text>
+              </Box>
+              <Text size="title" weight="semibold" tabular color={tone}>{l.percentUsed}% đã dùng</Text>
+              <Text wrap="truncate-end">
+                <Text color={tone ?? 'text'}>{m.on}</Text>
+                <Text color="inactive">{m.off}</Text>
+              </Text>
+            </Box>
+          )
+        })}
+
+        {/* Period and scan state. */}
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop={1}>
+          <Box flexDirection="row" columnGap={1}>
+            <Button key="week" label="7 ngày" hotkey="w" dimColor={s.days !== 7} onPress={choose(7)} />
+            <Button key="day" label="24 giờ" hotkey="d" dimColor={s.days !== 1} onPress={choose(1)} />
+          </Box>
+          <Button key="refresh" label={s.isRunning ? 'Đang quét…' : 'Quét lại'} hotkey="r" dimColor onPress={() => void refresh($, s.days)} />
+        </Box>
+        <Text size="footnote" color="subtle">
+          {report
+            ? `${count(report.requests)} lượt gọi trong ${period} · quét ${age(report.generatedAt)}`
+            : s.isRunning ? 'Đang đọc lịch sử phiên trên máy này…' : 'Chưa có số liệu. Bấm Quét lại.'}
+        </Text>
+        {s.error ? <Text color="error">Không quét được: {s.error}</Text> : null}
+
+        {/* One primary action. */}
+        {report?.fixAll ? (
+          <Box flexDirection="column" marginTop={1} padding={1} borderStyle="round" borderDimColor>
+            <Text weight="semibold">{report.fixAll.count} thay đổi cấu hình có thể giảm usage</Text>
+            <Text size="footnote" color="subtle">Claude cho xem từng thay đổi và chờ bạn duyệt trước khi sửa.</Text>
+            <Box marginTop={1}>
               <Button
                 key="fix-all"
-                label={`Sửa ${report.fixAll.count} trong ${report.fixAll.of} gợi ý (f)`}
+                label={`Xem và sửa ${report.fixAll.count} mục (f)`}
                 hotkey="f"
                 variant="primary"
                 onPress={() => void $.prompt.submit({ text: report.fixAll?.text ?? '' })}
               />
-              <Text> </Text>
-            </>
-          ) : null}
-          <Button key="refresh" label={s.isRunning ? 'Đang quét…' : 'Quét lại'} hotkey="r" onPress={() => void refresh($, s.days)} />
-        </Box>
-        {limits.map(l => (
-          <Text color={l.percentUsed >= 80 ? 'yellow' : undefined}>
-            {WINDOW[l.kind] ?? l.kind}: {bar(l.percentUsed, barWidth)} {l.percentUsed}% đã dùng{resetLabel(l.resetsAt)}
-          </Text>
-        ))}
-        {s.error ? <Text color="red">Không quét được: {s.error}</Text> : null}
-        {report ? (
-          <Text dimColor>
-            {report.requests} lượt gọi, khoảng {report.totalLabel} token quy đổi · quét {age(report.generatedAt)} ({Math.round(report.tookMs / 100) / 10} giây)
-          </Text>
-        ) : (
-          <Text dimColor>{s.isRunning ? 'Đang đọc lịch sử phiên…' : 'Chưa có số liệu. Bấm Quét lại.'}</Text>
-        )}
-        {report && report.rows.length === 0 ? <Text>Không mục nào chiếm từ 3% trở lên. Không có gì cần sửa.</Text> : null}
-        {(report?.rows ?? []).map(row => (
-          <Box key={row.id} flexDirection="column" marginTop={1}>
-            <Text bold={row.isMain} wrap="truncate-end">
-              {row.sharePct}% {row.label}
-            </Text>
-            <Text color={row.isMain ? 'yellow' : undefined} dimColor={!row.isMain}>
-              {bar(row.sharePct, barWidth)} {row.weightedLabel}
-            </Text>
-            <Text dimColor>{row.detail}</Text>
+            </Box>
+          </Box>
+        ) : null}
+
+        {report && rows.length === 0 ? (
+          <Box marginTop={1}><Text>Không mục nào chiếm từ 3% usage trở lên. Không có gì cần đổi.</Text></Box>
+        ) : null}
+
+        {configRows.length ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text size="footnote" weight="semibold" color="subtle">ĐỔI CẤU HÌNH</Text>
+            {configRows.map(renderRow)}
+          </Box>
+        ) : null}
+
+        {habitRows.length ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text size="footnote" weight="semibold" color="subtle">THÓI QUEN LÀM VIỆC</Text>
+            {habitRows.map(renderRow)}
+          </Box>
+        ) : null}
+
+        {/* Detail on demand. */}
+        {report?.breakdown?.length ? (
+          <Box flexDirection="column" marginTop={1}>
             <Button
-              key={`fix:${row.id}`}
-              label={s.sent.includes(row.id) ? (row.fix.type === 'compact' ? 'Đã thu gọn' : 'Đã gửi, gửi lại') : row.fix.type === 'compact' ? 'Thu gọn phiên này' : 'Sửa'}
-              dimColor={s.sent.includes(row.id)}
-              onPress={() => void applyFix($, row)}
+              key="detail"
+              label={s.showDetail ? 'Ẩn chi tiết' : 'Chi tiết theo skill, plugin, MCP'}
+              dimColor
+              onPress={() => void update($, scan, x => ({ ...x, showDetail: !x.showDetail }))}
             />
+            {s.showDetail
+              ? report.breakdown.map(g => (
+                  <Box key={`group:${g.title}`} flexDirection="column" marginTop={1}>
+                    <Text size="footnote" weight="semibold" color="subtle">{g.title.toUpperCase()}</Text>
+                    {g.items.map(i => (
+                      <Box key={`${g.title}:${i.name}`} flexDirection="row" columnGap={1}>
+                        <Text tabular color="subtle">{share(i.sharePct).padStart(5)}</Text>
+                        <Text wrap="truncate-end">{i.name}</Text>
+                      </Box>
+                    ))}
+                  </Box>
+                ))
+              : null}
           </Box>
-        ))}
-        {(report?.breakdown ?? []).map(g => (
-          <Box key={`group:${g.title}`} flexDirection="column" marginTop={1}>
-            <Text bold>{g.title} · % usage</Text>
-            {g.items.map(i => (
-              <Text wrap="truncate-end">
-                {String(i.sharePct).padStart(5)}%  {i.name}
-              </Text>
-            ))}
-          </Box>
-        ))}
+        ) : null}
+
         {report ? (
           <Box marginTop={1}>
-            <Text dimColor>
-              Ước tính: input ×1, ghi cache ×1,25 hoặc ×2, đọc cache ×0,1, output ×5. Một lượt có thể thuộc nhiều mục, nên tổng có thể quá 100%. Nút Sửa gửi một yêu cầu vào phiên; Claude cho xem từng thay đổi trước khi sửa.
+            <Text size="caption" color="subtle">
+              % là phần usage có dính tới mục đó, nên các mục chồng lên nhau và cộng lại quá 100%. Số là ước tính từ lịch sử phiên trên máy này.
             </Text>
           </Box>
         ) : null}

@@ -31,6 +31,7 @@ export type Scan = {
   week: Report | null
   day: Report | null
   sent: string[]
+  showDetail?: boolean
 }
 
 declare module 'claude-code' {

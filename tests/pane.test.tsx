@@ -58,21 +58,26 @@ test('the pane lists what used the usage and a Fix sends its prompt', async ($, 
 
   for (const surface of ['desktop', 'terminal'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /26341 lượt gọi/ }))).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: /67.9% Effort xhigh/ }))).toBeDefined()
-    expect((await ui.find({ key: 'fix:long' }))?.text).toBe('Thu gọn phiên này')
-    expect((await ui.find({ type: 'Text', text: /Tuần này: .* 84% đã dùng · reset 17\/11/ }))).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: /1.6%  mattpocock-skills/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^26\.341 lượt gọi trong 7 ngày/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^Effort xhigh hoặc max$/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^\s*68%$/ }))).toBeDefined()
+    expect((await ui.find({ key: 'fix:long' }))?.text).toBe('Thu gọn phiên')
+    expect((await ui.find({ type: 'Text', text: /^84% đã dùng$/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^Làm mới T3 17\/11, 14:00$/ }))).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /mattpocock-skills/ })).toBeUndefined()
+    await ui.press({ key: 'detail' })
+    expect((await ui.find({ type: 'Text', text: /^mattpocock-skills$/ }))).toBeDefined()
+    await ui.press({ key: 'detail' })
     await ui.unmount()
   }
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'fix:effort' })
   expect(submitted).toEqual(['Hạ effort mặc định. Cho tôi xem từng thay đổi.'])
-  expect((await ui.find({ key: 'fix-all' }))?.text).toBe('Sửa 1 trong 2 gợi ý (f)')
+  expect((await ui.find({ key: 'fix-all' }))?.text).toBe('Xem và sửa 1 mục (f)')
   await ui.press({ key: 'fix-all' })
   expect(submitted[1]).toBe('Sửa những gì bảng Usage chỉ ra.\n1. Hạ effort.')
-  expect((await ui.find({ key: 'fix:effort' }))?.text).toBe('Đã gửi, gửi lại')
+  expect((await ui.find({ key: 'fix:effort' }))?.text).toBe('Gửi lại')
   await ui.unmount()
 })
 
